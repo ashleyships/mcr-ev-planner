@@ -1,0 +1,5 @@
+{
+  "functions": {
+    "api/telegram-webhook.js": { "maxDuration": 30 }
+  }
+}
