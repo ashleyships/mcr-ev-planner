@@ -140,6 +140,46 @@ function triageRule_(e) {
     return {decision:'include',reason:'Interactive event type offers a plausible adult/social outreach opportunity; no explicit restriction found.'};
   return null;
 }
+// TEMPORARY, manual one-time migration. Not called by any trigger or refresh path.
+// Writes only the three decision cells; provider facts and other rows are untouched.
+function recheckPreviouslyIncludedEvents() {
+  return withLock_(function() {
+    var sh=table_('CityEvents'), data=sh.getDataRange().getValues(), headers=data[0] || [];
+    ['ID','Event Name','Source','Include','Triage','Triage Reason','Ignored (Y/N)','Feedback'].forEach(function(key) {
+      if (headers.indexOf(key)<0) throw new Error('Migration requires CityEvents column: '+key);
+    });
+    var ignored=rows_('Event Ignore List');
+    var summary={examined:0,eligible:0,changed:0,unchanged:0,byReason:{}};
+    var asEvent=function(values) {
+      var e={}; headers.forEach(function(key,i) { if(key) e[key]=values[i]; }); return e;
+    };
+    var eligible=function(e) {
+      return e.Triage==='Auto included' && truth_(e.Include) && automaticEvent_(e)
+        && !truth_(e['Ignored (Y/N)']) && !norm_(e.Feedback)
+        && !ignored.some(function(x) { return (norm_(e.ID) && e.ID===x.ID) || sameEvent_(x,e); });
+    };
+    for(var i=1;i<data.length;i++) {
+      summary.examined++;
+      var e=asEvent(data[i]);
+      if (!eligible(e)) continue;
+      summary.eligible++;
+      var decision=triageRule_(e);
+      if (!decision || decision.decision!=='reject') continue;
+      // Re-read before writing so an owner edit made during this run is preserved.
+      var current=asEvent(sh.getRange(i+1,1,1,headers.length).getValues()[0]);
+      if (!eligible(current) || triageSnapshot_(current)!==triageSnapshot_(e)) continue;
+      sh.getRange(i+1,headers.indexOf('Include')+1).setValue(false);
+      sh.getRange(i+1,headers.indexOf('Triage Reason')+1).setValue(decision.reason);
+      sh.getRange(i+1,headers.indexOf('Triage')+1).setValue('Auto rejected');
+      summary.changed++;
+      summary.byReason[decision.reason]=(summary.byReason[decision.reason] || 0)+1;
+    }
+    summary.unchanged=summary.examined-summary.changed;
+    console.log('Previously included event recheck: '+JSON.stringify(summary));
+    return summary;
+  });
+}
+
 function triageCityEvents_() {
   var ignored=rows_('Event Ignore List');
   var pending=rows_('CityEvents').filter(function(e) {

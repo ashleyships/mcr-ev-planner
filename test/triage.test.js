@@ -188,3 +188,57 @@ test('Apify refresh starts asynchronously and repeat refresh does not start a se
  const {c}=harness();let starts=0;c.apify_=(path)=>{assert.match(path,/waitForFinish=1/);starts++;return {data:{id:'fixture'}};};c.datasetItems_=()=>{throw Error('Refresh must not wait for a dataset')};c.triageCityEvents_=()=>{throw Error('Refresh must not triage before import')};
  c.refreshEventbriteEvents();c.refreshEventbriteEvents();assert.equal(starts,1);assert.equal(c.job_('eventbrite').phase,'RUNNING');
 });
+function migrationFixture(events) {
+ const h=harness(),{c,tables}=h,headers=Array.from(c.MCR.schemas.CityEvents).concat(['Custom Provider Field']);
+ const grid=[headers,...events.map(e=>headers.map(k=>e[k]??''))],writes=[],logs=[];
+ c.console.log=s=>logs.push(s);
+ c.openAIJson_=()=>{assert.fail('Migration must never call OpenAI');};
+ c.replaceRows_=()=>{assert.fail('Migration must never rewrite full event rows');};
+ c.table_=name=>{assert.equal(name,'CityEvents');return {
+  getDataRange:()=>({getValues:()=>structuredClone(grid)}),
+  getRange:(r,col,n=1,m=1)=>({getValues:()=>structuredClone(grid.slice(r-1,r-1+n).map(row=>row.slice(col-1,col-1+m))),setValue:value=>{writes.push({row:r,column:headers[col-1],value});grid[r-1][col-1]=value;}})
+ };};
+ return {...h,grid,headers,writes,logs,events:()=>grid.slice(1).map(row=>Object.fromEntries(headers.map((k,i)=>[k,row[i]])))};
+}
+const historical=extra=>event({Include:true,Triage:'Auto included','Triage Reason':'Previous automatic assessment',...extra});
+for(const name of ['Freshers nightclub party','Manchester Single Muslim Get Together','Islamic conference']) test('migration rejects historical inclusion: '+name,()=>{
+ const h=migrationFixture([historical({'Event Name':name})]);const expected=h.c.triageRule_(h.events()[0]);const summary=h.c.recheckPreviouslyIncludedEvents();
+ assert.equal(summary.examined,1);assert.equal(summary.eligible,1);assert.equal(summary.changed,1);assert.equal(summary.unchanged,0);assert.equal(summary.byReason[expected.reason],1);
+ assert.equal(h.events()[0].Include,false);assert.equal(h.events()[0].Triage,'Auto rejected');assert.equal(h.events()[0]['Triage Reason'],expected.reason);assert.equal(h.writes.length,3);
+});
+const migrationProtected=[
+ ['still suitable',{'Event Name':'Community market'}],
+ ['ambiguous',{'Event Name':'Manchester Connections'}],
+ ['uncertain',{Venue:''}],
+ ['owner feedback',{Feedback:'Owner chose this event'}],
+ ['ignored',{'Ignored (Y/N)':'Y'}],
+ ['manual label',{Triage:'Owner selected'}],
+ ['already rejected',{Triage:'Auto rejected'}],
+ ['unchecked',{Include:false}],
+ ['manual source',{Source:'forwarded'}]
+];
+for(const [label,extra] of migrationProtected) test('migration leaves '+label+' unchanged',()=>{
+ const h=migrationFixture([historical({'Event Name':'Nightclub party',...extra})]),before=JSON.stringify(h.grid);const result=h.c.recheckPreviouslyIncludedEvents();
+ assert.equal(result.changed,0);assert.equal(result.unchanged,1);assert.equal(h.writes.length,0);assert.equal(JSON.stringify(h.grid),before);
+});
+test('migration respects Ignore List matches and never changes the list',()=>{
+ const h=migrationFixture([historical({'Event Name':'Nightclub party'})]);h.tables['Event Ignore List']=[event({ID:'another-source','Event Name':'Nightclub party'})];const before=JSON.stringify(h.tables['Event Ignore List']);
+ const result=h.c.recheckPreviouslyIncludedEvents();assert.equal(result.eligible,0);assert.equal(result.changed,0);assert.equal(h.writes.length,0);assert.equal(JSON.stringify(h.tables['Event Ignore List']),before);
+});
+test('migration preserves every provider/factual cell byte-for-byte and is idempotent',()=>{
+ const h=migrationFixture(['ticketmaster','instagram','eventbrite'].map((Source,i)=>historical({ID:'id'+i,Source,'Event Name':'Nightclub party',URL:'https://example.test/event?x=1&y=2',Added:new Date('2026-09-19T10:00:00Z'),'Custom Provider Field':'=unchanged literal\nUnicode café'})));
+ const before=structuredClone(h.grid),result=h.c.recheckPreviouslyIncludedEvents();assert.equal(result.changed,3);
+ const mutable=['Include','Triage','Triage Reason'];
+ for(let r=1;r<h.grid.length;r++)for(let col=0;col<h.headers.length;col++)if(!mutable.includes(h.headers[col]))assert.equal(JSON.stringify(h.grid[r][col]),JSON.stringify(before[r][col]),h.headers[col]);
+ assert.ok(h.writes.every(w=>mutable.includes(w.column)));const after=JSON.stringify(h.grid);h.writes.length=0;const repeat=h.c.recheckPreviouslyIncludedEvents();assert.equal(repeat.eligible,0);assert.equal(repeat.changed,0);assert.equal(repeat.unchanged,3);assert.equal(h.writes.length,0);assert.equal(JSON.stringify(h.grid),after);
+});
+test('migration summary counts all data rows and groups only changed reasons',()=>{
+ const h=migrationFixture([historical({'Event Name':'Nightclub party'}),historical({ID:'2','Event Name':'Islamic conference'}),historical({ID:'3'}),{Include:false}]);const result=h.c.recheckPreviouslyIncludedEvents();
+ assert.deepEqual(JSON.parse(JSON.stringify(result)),{examined:4,eligible:3,changed:2,unchanged:2,byReason:{'Primary event format indicates clubbing, partying or nightlife.':1,'Event explicitly centres on a non-Christian religion or religious community.':1}});
+ assert.equal(h.logs.length,1);assert.ok(h.logs[0].includes(JSON.stringify(result)));assert.doesNotMatch(h.logs[0],/tm_1|https:|Nightclub party|Islamic conference/);
+});
+test('migration re-read preserves feedback entered after initial scan',()=>{
+ const h=migrationFixture([historical({'Event Name':'Nightclub party'})]),original=h.c.triageRule_;
+ h.c.triageRule_=e=>{h.grid[1][h.headers.indexOf('Feedback')]='Owner intervened';return original(e);};
+ const result=h.c.recheckPreviouslyIncludedEvents();assert.equal(result.eligible,1);assert.equal(result.changed,0);assert.equal(h.writes.length,0);assert.equal(h.events()[0].Include,true);assert.equal(h.events()[0].Feedback,'Owner intervened');
+});
