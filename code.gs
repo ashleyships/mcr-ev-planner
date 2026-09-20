@@ -108,6 +108,16 @@ function triageRule_(e) {
   if (!norm_(e['Event Name']) || !isoDay_(e.Date) || isoDay_(e.Date)<today_() || !norm_(e.Venue) || !norm_(e.Area))
     return {decision:'uncertain',reason:'Insufficient current date, venue or location evidence.'};
   var name=norm_(e['Event Name']), category=norm_(e.Category || ''), text=name+' '+category;
+  // Event affiliation only: never classify attendees from names, venue, area or cuisine.
+  var faith="(?:muslims?|islamic|islam|hindu(?:s|ism)?|sikhs?|sikhism|buddhists?|buddhism|jewish|judaism|jews|jains?|jainism|bah[a\u00e1][\u2019'-]?i|pagan|shinto)", eventFocus="(?:religious|community|marriage|matrimonial|singles?|young[- ]adults?|youth|students?|socials?|networking|workshops?|events?|conferences?|gatherings?|get[- ]togethers?|meet[- ]?ups?|festivals?|worship|prayers?|services?|celebrations?|open[- ]days?)";
+  var religiousReference=new RegExp("\\b"+faith+"\\b|\\b(?:mosque|synagogue|gurdwara)\\b",'i');
+  var explicitFocus=new RegExp("\\b"+faith+"(?:[\u2019']s?)?\\s+"+eventFocus+"\\b|\\b(?:mosque|synagogue|gurdwara)\\s+"+eventFocus+"\\b|\\b(?:for|aimed at|targeted at|organised by|organized by)\\s+(?:young\\s+|single\\s+)?"+faith+"\\b",'i');
+  var explicitCategory=new RegExp("^(?:(?:religion|religious|faith|spirituality)\\s*[/&:,-]\\s*)?"+faith+"$",'i');
+  var religiousMention=religiousReference.test(text);
+  // Mentions in educational/cultural/interfaith contexts do not establish affiliation.
+  var contextualMention=/\b(christian|interfaith|comparative|history|historical|art|architecture|cuisine|food|about|near|opposite)\b/.test(text);
+  if (religiousMention && !contextualMention && (explicitFocus.test(name) || explicitFocus.test(category) || explicitCategory.test(category)))
+    return {decision:'reject',reason:'Event explicitly centres on a non-Christian religion or religious community.'};
   if (/\b(cancelled|canceled|private|invite[- ]only|invitation[- ]only|members[- ]only|online[- ]only|webinar|live[- ]?stream|children|kids|toddlers|under[- ]18s?)\b/.test(text))
     return {decision:'reject',reason:'Listing indicates restricted, online, cancelled or child-focused attendance.'};
   var interactive=/\b(freshers?[’']?\s+fairs?|(?:university|society|campus)\s+fairs?|student\s+(?:society\s+)?socials?|networking|markets?|street[- ]food\s+markets?|workshops?|classes|exhibitions?|open[- ]days?|meet[- ]?ups?|(?:running|book|photography|chess)\s+clubs?|(?:community|hobby)\s+(?:events?|gatherings?)|(?:public|cultural|community|music|food)\s+festivals?|(?:public|community)\s+(?:socials?|campus\s+events?))\b/;
@@ -125,6 +135,7 @@ function triageRule_(e) {
     if (!participatory) return {decision:'reject',reason:'Ordinary performance or spectator match offers little natural interaction.'};
     return null;
   }
+  if (religiousMention) return null; // Ambiguous affiliation: evidence-only AI assessment.
   if (participatory)
     return {decision:'include',reason:'Interactive event type offers a plausible adult/social outreach opportunity; no explicit restriction found.'};
   return null;
@@ -151,6 +162,8 @@ function triageCityEvents_() {
         +'Absence of explicit public, 18-30 or networking wording is not by itself grounds for rejection. Student/university events are not automatically restricted. '
         +'Reject when evidence positively indicates cancelled, online-only, child-focused, private/invite-only/members-only, primarily passive performances/spectator matches, or nightlife primarily centred on partying, drinking or dancing. Nightclubs, club nights, parties, raves, freshers parties/raves and afterparties are unsuitable. '
         +'Context matters: club, DJ, music, football, concert, university or student alone must not cause rejection. Running/book/photography/chess clubs, sports club open days and DJ workshops can be suitable. Distinguish discussion or learning about nightlife from actual nightlife events. '
+        +'This planner discovers Christian evangelism opportunities. Reject events explicitly organised around, targeted toward or primarily centred on a non-Christian religion or religious community, even if public, social, singles, networking, workshop or young-adult signals are positive. Examples include Muslim marriage/singles events, Islamic gatherings, mosque events, and Hindu, Sikh, Buddhist or Jewish religious/community events. '
+        +'Require explicit evidence about the EVENT in supplied name/category or facts. Never infer religion from a person’s name, ethnicity, nationality, cuisine, cultural background, venue, location or neighbourhood, or from who might attend. A historical/educational discussion or cultural reference alone does not establish religious affiliation. Christian events and events without explicit religious affiliation continue through normal suitability assessment. '
         +'For genuinely insufficient or contradictory information return uncertain; never invent supporting facts. '
         +'Return exactly one decision for each index. Reasons must be short and based on supplied evidence. Never generate or change names, dates, times, venues, areas, URLs or other provider facts.',
         [{role:'user',content:JSON.stringify(batch.map(function(e,i) {
